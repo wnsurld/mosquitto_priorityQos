@@ -121,7 +121,13 @@ struct mosquitto *context__init(void)
 #ifdef WITH_TLS
 	context->ssl = NULL;
 #endif
-
+	// 추가한 값들 초기화
+	context->high_mask = 0;
+	context->mid_mask = 0;
+	context->low_mask = 0;
+	context->pool_mask = 0;
+	memset(context->pool, 0, sizeof(context->poll));
+    
 	return context;
 }
 
