@@ -478,6 +478,15 @@ struct mosquitto {
 	uint32_t events;
 #endif
 	struct proxy_data proxy;
+	
+	// 커널 버퍼에서 복사한 패킷의 주소를 담는 풀
+	struct mosquitto__packet *pool[64];
+	// 우선순위 별 mask
+	uint64_t high_mask;
+	uint64_t mid_mask;
+	uint64_t low_mask;
+	// pool 빈 슬롯 확인용 마스크 (1: used, 2: empty)
+	uint64_t pool_mask;
 };
 
 #define STREMPTY(str) (str[0] == '\0')
