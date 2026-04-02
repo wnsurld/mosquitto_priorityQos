@@ -126,7 +126,7 @@ struct mosquitto *context__init(void)
 	context->mid_mask = 0;
 	context->low_mask = 0;
 	context->pool_mask = 0;
-	memset(context->pool, 0, sizeof(context->poll));
+	memset(context->pool, 0, sizeof(context->pool));
     
 	return context;
 }
