@@ -282,14 +282,62 @@ int packet__write(struct mosquitto *mosq)
 		return MOSQ_ERR_NO_CONN;
 	}
 
+	int target_idx = -1;
+	bool is_priority_packet = false;
+
 	COMPAT_pthread_mutex_lock(&mosq->out_packet_mutex);
-	packet = mosq->out_packet;
+	if(mosq->high_mask != 0) {
+		target_idx = __builtin_ctzll(mosq->high_mask);
+		packet = mosq->pool[target_idx];
+	}
+	else if(mosq->mid_mask != 0) {
+		target_idx = __builtin_ctzll(mosq->mid_mask);
+		packet = mosq->pool[target_idx];
+	}
+	else if(mosq->low_mask != 0) {
+		target_idx = __builtin_ctzll(mosq->low_mask);
+		packet = mosq->pool[target_idx];
+	}
+	else {packet = mosq->out_packet;}
 	COMPAT_pthread_mutex_unlock(&mosq->out_packet_mutex);
 
 	if(packet == NULL){
 		return MOSQ_ERR_SUCCESS;
 	}
 
+	if(target_idx != -1 && packet != NULL){
+		is_priority_packet = true;
+
+        COMPAT_pthread_mutex_lock(&mosq->out_packet_mutex);
+        
+        if(mosq->out_packet == packet){
+            mosq->out_packet = packet->next;
+            if(mosq->out_packet == NULL){
+                mosq->out_packet_last = NULL;
+            }
+        } 
+        else {
+            struct mosquitto__packet *prev = mosq->out_packet;
+            while(prev && prev->next != packet){
+                prev = prev->next;
+            }
+            if(prev){
+                prev->next = packet->next;
+                if(packet->next == NULL){
+                    mosq->out_packet_last = prev;
+                }
+            }
+        }
+        
+        // pool 관련 마스크 및 데이터 정리
+        mosq->high_mask &= ~(1ULL << target_idx);
+        mosq->mid_mask &= ~(1ULL << target_idx);
+        mosq->low_mask &= ~(1ULL << target_idx);
+        mosq->pool_mask &= ~(1ULL << target_idx);
+        mosq->pool[target_idx] = NULL;
+        
+        COMPAT_pthread_mutex_unlock(&mosq->out_packet_mutex);
+	}
 #ifdef WITH_BROKER
 	mux__add_out(mosq);
 #endif
@@ -339,9 +387,15 @@ int packet__write(struct mosquitto *mosq)
 #endif
 		}
 
-		next_packet = packet__get_next_out(mosq);
-		mosquitto_FREE(packet);
-		packet = next_packet;
+		if (is_priority_packet) {
+			mosquitto_FREE(packet);
+			return MOSQ_ERR_SUCCESS;
+		}
+		else{
+			next_packet = packet__get_next_out(mosq);
+			mosquitto_FREE(packet);
+			packet = next_packet;
+		}
 
 #ifdef WITH_BROKER
 		mosq->next_msg_out = db.now_s + mosq->keepalive;
