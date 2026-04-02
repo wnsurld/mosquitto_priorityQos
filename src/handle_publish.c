@@ -130,23 +130,24 @@ int handle__accepted_publish(struct mosquitto *context, struct mosquitto__base_m
 			}
 			
 			// 패킷 배열풀에 복사 후 비트마스킹 실행 로직
-			if (context->pool_mask != 0xFFFFFFFFFFFFFFFFULL) {
+			char *topic = base_msg->data.topic;
+			int topic_len = strlen(topic);
+			int priority = -1;
+
+			if (topic_len > 7) {
+				if (strcmp(topic + topic_len - 6, "/pQoS0") == 0) priority = 0;
+				else if (strcmp(topic + topic_len - 6, "/pQoS1") == 0) priority = 1;
+				else if (strcmp(topic + topic_len - 6, "/pQoS2") == 0) priority = 2;
+			}
+
+			if (priority != -1 && context->pool_mask != 0xFFFFFFFFFFFFFFFFULL) {
 				int p_idx = __builtin_ctzll(~context->pool_mask);
-
 				context->pool[p_idx] = (struct mosquitto__packet *)base_msg;
-
-				char *topic = base_msg->data.topic;
-				int topic_len = strlen(topic);
-
-				if (topic_len > 7 && strcmp(topic + topic_len - 6, "/pQoS0") == 0) {
-					context->high_mask |= (1ULL << p_idx);
-				}
-				else if (topic_len > 7 && strcmp(topic + topic_len - 6, "/pQoS1") == 0) {
-					context->mid_mask |= (1ULL << p_idx);
-				}
-				else if (topic_len > 7 && strcmp(topic + topic_len - 6, "/pQoS2") == 0) {
-					context->low_mask |= (1ULL << p_idx);
-				}
+				
+				if (priority == 0) {context->high_mask |= (1ULL << p_idx);}
+				else if (priority == 1) {context->mid_mask |= (1ULL << p_idx);}
+				else if (priority == 2) {context->low_mask |= (1ULL << p_idx);}
+				
 				context->pool_mask |= (1ULL << p_idx);
 			}
 		}else{
