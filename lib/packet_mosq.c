@@ -287,14 +287,17 @@ int packet__write(struct mosquitto *mosq)
 
 	COMPAT_pthread_mutex_lock(&mosq->out_packet_mutex);
 	if(mosq->high_mask != 0) {
+		is_priority_packet = true;
 		target_idx = __builtin_ctzll(mosq->high_mask);
 		packet = mosq->pool[target_idx];
 	}
 	else if(mosq->mid_mask != 0) {
+		is_priority_packet = true;
 		target_idx = __builtin_ctzll(mosq->mid_mask);
 		packet = mosq->pool[target_idx];
 	}
 	else if(mosq->low_mask != 0) {
+		is_priority_packet = true;
 		target_idx = __builtin_ctzll(mosq->low_mask);
 		packet = mosq->pool[target_idx];
 	}
@@ -305,39 +308,6 @@ int packet__write(struct mosquitto *mosq)
 		return MOSQ_ERR_SUCCESS;
 	}
 
-	if(target_idx != -1 && packet != NULL){
-		is_priority_packet = true;
-
-        COMPAT_pthread_mutex_lock(&mosq->out_packet_mutex);
-        
-        if(mosq->out_packet == packet){
-            mosq->out_packet = packet->next;
-            if(mosq->out_packet == NULL){
-                mosq->out_packet_last = NULL;
-            }
-        } 
-        else {
-            struct mosquitto__packet *prev = mosq->out_packet;
-            while(prev && prev->next != packet){
-                prev = prev->next;
-            }
-            if(prev){
-                prev->next = packet->next;
-                if(packet->next == NULL){
-                    mosq->out_packet_last = prev;
-                }
-            }
-        }
-        
-        // pool 관련 마스크 및 데이터 정리
-        mosq->high_mask &= ~(1ULL << target_idx);
-        mosq->mid_mask &= ~(1ULL << target_idx);
-        mosq->low_mask &= ~(1ULL << target_idx);
-        mosq->pool_mask &= ~(1ULL << target_idx);
-        mosq->pool[target_idx] = NULL;
-        
-        COMPAT_pthread_mutex_unlock(&mosq->out_packet_mutex);
-	}
 #ifdef WITH_BROKER
 	mux__add_out(mosq);
 #endif
@@ -388,6 +358,50 @@ int packet__write(struct mosquitto *mosq)
 		}
 
 		if (is_priority_packet) {
+			bool queue_empty = false;
+
+			COMPAT_pthread_mutex_lock(&mosq->out_packet_mutex);
+        
+			if(mosq->out_packet == packet) {
+				mosq->out_packet = packet->next;
+				if(mosq->out_packet == NULL) {mosq->out_packet_last = NULL;}
+			} 
+			else {
+				struct mosquitto__packet *prev = mosq->out_packet;
+				while(prev && prev->next != packet) {prev = prev->next;}
+				if(prev){
+					prev->next = packet->next;
+					if(packet->next == NULL) {mosq->out_packet_last = prev;}
+				}
+			}
+
+			// out_packet_count 및 out_packet_bytes 업데이트
+			mosq->out_packet_count--;
+			mosq->out_packet_bytes -= packet->packet_length;
+			metrics__int_dec(mosq_gauge_out_packets, 1);
+			metrics__int_dec(mosq_gauge_out_packet_bytes, packet->packet_length);
+			// pool 관련 마스크 및 데이터 정리
+			mosq->high_mask &= ~(1ULL << target_idx);
+			mosq->mid_mask &= ~(1ULL << target_idx);
+			mosq->low_mask &= ~(1ULL << target_idx);
+			mosq->pool_mask &= ~(1ULL << target_idx);
+			mosq->pool[target_idx] = NULL;
+
+			if(mosq->out_packet == NULL) {queue_empty = true;}
+			
+			COMPAT_pthread_mutex_unlock(&mosq->out_packet_mutex);
+
+			
+#ifdef WITH_BROKER
+			mosq->next_msg_out = db.now_s + mosq->keepalive;
+			if(queue_empty){
+				mux__remove_out(mosq);
+			}
+#else
+			COMPAT_pthread_mutex_lock(&mosq->msgtime_mutex);
+			mosq->next_msg_out = mosquitto_time() + mosq->keepalive;
+			COMPAT_pthread_mutex_unlock(&mosq->msgtime_mutex);
+#endif
 			mosquitto_FREE(packet);
 			return MOSQ_ERR_SUCCESS;
 		}
