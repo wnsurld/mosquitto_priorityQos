@@ -131,14 +131,11 @@ int handle__accepted_publish(struct mosquitto *context, struct mosquitto__base_m
 			
 			// 패킷 배열풀에 복사 후 비트마스킹 실행 로직
 			char *topic = base_msg->data.topic;
-			int topic_len = strlen(topic);
 			int priority = -1;
 
-			if (topic_len > 7) {
-				if (strcmp(topic + topic_len - 6, "/pQoS0") == 0) priority = 0;
-				else if (strcmp(topic + topic_len - 6, "/pQoS1") == 0) priority = 1;
-				else if (strcmp(topic + topic_len - 6, "/pQoS2") == 0) priority = 2;
-			}
+			if (strstr(topic, "/pQoS0")) priority = 0;
+			else if (strstr(topic, "/pQoS1")) priority = 1;
+			else if (strstr(topic, "/pQoS2")) priority = 2;
 
 			if (priority != -1 && context->pool_mask != 0xFFFFFFFFFFFFFFFFULL) {
 				int p_idx = __builtin_ctzll(~context->pool_mask);

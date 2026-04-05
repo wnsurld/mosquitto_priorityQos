@@ -275,6 +275,7 @@ int packet__write(struct mosquitto *mosq)
 	struct mosquitto__packet *packet, *next_packet;
 	enum mosquitto_client_state state;
 
+	log__printf(NULL, MOSQ_LOG_INFO, "패킷쓰기 시작!!!\n");
 	if(!mosq){
 		return MOSQ_ERR_INVAL;
 	}
@@ -288,20 +289,25 @@ int packet__write(struct mosquitto *mosq)
 	COMPAT_pthread_mutex_lock(&mosq->out_packet_mutex);
 	if(mosq->high_mask != 0) {
 		is_priority_packet = true;
+		log__printf(NULL, MOSQ_LOG_INFO, "하이 패킷임 이거 ㅋㅋ\n");
 		target_idx = __builtin_ctzll(mosq->high_mask);
 		packet = mosq->pool[target_idx];
 	}
 	else if(mosq->mid_mask != 0) {
 		is_priority_packet = true;
+		log__printf(NULL, MOSQ_LOG_INFO, "미드 패킷임 이거 ㅋㅋ\n");
 		target_idx = __builtin_ctzll(mosq->mid_mask);
 		packet = mosq->pool[target_idx];
 	}
 	else if(mosq->low_mask != 0) {
 		is_priority_packet = true;
+		log__printf(NULL, MOSQ_LOG_INFO, "로우 패킷임 이거 ㅋㅋ\n");
 		target_idx = __builtin_ctzll(mosq->low_mask);
 		packet = mosq->pool[target_idx];
 	}
-	else {packet = mosq->out_packet;}
+	else {packet = mosq->out_packet;
+		log__printf(NULL, MOSQ_LOG_INFO, "일반 패킷임 이거 ㅋㅋ\n");
+	}
 	COMPAT_pthread_mutex_unlock(&mosq->out_packet_mutex);
 
 	if(packet == NULL){
@@ -359,7 +365,7 @@ int packet__write(struct mosquitto *mosq)
 
 		if (is_priority_packet) {
 			bool queue_empty = false;
-
+			log__printf(NULL, MOSQ_LOG_INFO, "우선순위 패킷일까용");
 			COMPAT_pthread_mutex_lock(&mosq->out_packet_mutex);
         
 			if(mosq->out_packet == packet) {
