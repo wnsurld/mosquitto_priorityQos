@@ -365,37 +365,56 @@ int packet__write(struct mosquitto *mosq)
 
 		if (is_priority_packet) {
 			bool queue_empty = false;
-			log__printf(NULL, MOSQ_LOG_INFO, "우선순위 패킷일까용");
+			bool removed = false;
+			log__printf(NULL, MOSQ_LOG_INFO, "우선순위 패킷일까용\n");
 			COMPAT_pthread_mutex_lock(&mosq->out_packet_mutex);
         
 			if(mosq->out_packet == packet) {
+				log__printf(NULL, MOSQ_LOG_INFO, "큐 머리에용\n");
 				mosq->out_packet = packet->next;
 				if(mosq->out_packet == NULL) {mosq->out_packet_last = NULL;}
+				removed = true;
+				log__printf(NULL, MOSQ_LOG_INFO, "머리끊기 성공\n");
 			} 
 			else {
+				log__printf(NULL, MOSQ_LOG_INFO, "중간 꼽사리에옹\n");
 				struct mosquitto__packet *prev = mosq->out_packet;
 				while(prev && prev->next != packet) {prev = prev->next;}
 				if(prev){
 					prev->next = packet->next;
 					if(packet->next == NULL) {mosq->out_packet_last = prev;}
+					removed = true;
+					log__printf(NULL, MOSQ_LOG_INFO, "중간 끊기 성공\n");
 				}
 			}
 
-			// out_packet_count 및 out_packet_bytes 업데이트
-			mosq->out_packet_count--;
-			mosq->out_packet_bytes -= packet->packet_length;
-			metrics__int_dec(mosq_gauge_out_packets, 1);
-			metrics__int_dec(mosq_gauge_out_packet_bytes, packet->packet_length);
-			// pool 관련 마스크 및 데이터 정리
-			mosq->high_mask &= ~(1ULL << target_idx);
-			mosq->mid_mask &= ~(1ULL << target_idx);
-			mosq->low_mask &= ~(1ULL << target_idx);
-			mosq->pool_mask &= ~(1ULL << target_idx);
-			mosq->pool[target_idx] = NULL;
-
-			if(mosq->out_packet == NULL) {queue_empty = true;}
+			if(removed) {
+				// out_packet_count 및 out_packet_bytes 업데이트
+				mosq->out_packet_count--;
+				mosq->out_packet_bytes -= packet->packet_length;
+				metrics__int_dec(mosq_gauge_out_packets, 1);
+				metrics__int_dec(mosq_gauge_out_packet_bytes, packet->packet_length);
 			
+				if(target_idx >= 0) {
+					// pool 관련 마스크 및 데이터 정리
+					mosq->high_mask &= ~(1ULL << target_idx);
+					mosq->mid_mask &= ~(1ULL << target_idx);
+					mosq->low_mask &= ~(1ULL << target_idx);
+					mosq->pool_mask &= ~(1ULL << target_idx);
+					mosq->pool[target_idx] = NULL;
+				}
+				packet->next = NULL;	
+				
+				if(mosq->out_packet == NULL) {queue_empty = true;}
+			}
 			COMPAT_pthread_mutex_unlock(&mosq->out_packet_mutex);
+
+			if(!removed) {
+				log__printf(NULL, MOSQ_LOG_ERR,
+					"우선순위 끊기 실패 ㅈㅈ;, packet=%p idx=%d\n",
+					(void *)packet, target_idx);
+				return MOSQ_ERR_PROTOCOL;
+			}
 
 			
 #ifdef WITH_BROKER
