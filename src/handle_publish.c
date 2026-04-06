@@ -128,25 +128,6 @@ int handle__accepted_publish(struct mosquitto *context, struct mosquitto__base_m
 			if(rc){
 				return rc;
 			}
-			
-			// 패킷 배열풀에 복사 후 비트마스킹 실행 로직
-			char *topic = base_msg->data.topic;
-			int priority = -1;
-
-			if (strstr(topic, "/pQoS0")) priority = 0;
-			else if (strstr(topic, "/pQoS1")) priority = 1;
-			else if (strstr(topic, "/pQoS2")) priority = 2;
-
-			if (priority != -1 && context->pool_mask != 0xFFFFFFFFFFFFFFFFULL) {
-				int p_idx = __builtin_ctzll(~context->pool_mask);
-				context->pool[p_idx] = (struct mosquitto__packet *)base_msg;
-				
-				if (priority == 0) {context->high_mask |= (1ULL << p_idx);}
-				else if (priority == 1) {context->mid_mask |= (1ULL << p_idx);}
-				else if (priority == 2) {context->low_mask |= (1ULL << p_idx);}
-				
-				context->pool_mask |= (1ULL << p_idx);
-			}
 		}else{
 			/* Client isn't allowed any more incoming messages, so fail early */
 			return process_bad_message(context, base_msg, MQTT_RC_QUOTA_EXCEEDED);

@@ -160,6 +160,44 @@ static void packet__queue_append(struct mosquitto *mosq, struct mosquitto__packe
 #endif
 
 	COMPAT_pthread_mutex_lock(&mosq->out_packet_mutex);
+
+	// PUBLISH 패킷인지 확인
+	if((packet->command & 0xF0) == CMD_PUBLISH){
+		uint32_t topic_pos;
+		uint16_t topic_len;
+		char topic_buf[256];
+		int priority = -1;
+
+		// topic 위치 계산 (고정 헤더, 가변 헤더 길이 고려)
+		topic_pos = WS_PACKET_OFFSET + 1U + (uint32_t)packet->remaining_count;
+
+		// topic 길이 읽기
+		topic_len = (uint16_t)((packet->payload[topic_pos] << 8) | packet->payload[topic_pos+1]);
+		topic_pos += 2;
+
+		// topic 보고 우선순위 결정
+		if(topic_len < sizeof(topic_buf)){
+			memcpy(topic_buf, &packet->payload[topic_pos], topic_len);
+			topic_buf[topic_len] = '\0';
+
+			if(strstr(topic_buf, "/pQoS0")) {priority = 0;}
+			else if(strstr(topic_buf, "/pQoS1")) {priority = 1;}
+			else if(strstr(topic_buf, "/pQoS2")) {priority = 2;}
+		}
+
+		// 우선순위 패킷인 경우, pool에 저장하고 마스크 업데이트
+		if(priority != -1 && mosq->pool_mask != 0xFFFFFFFFFFFFFFFFULL){
+			int p_idx = __builtin_ctzll(~mosq->pool_mask);
+
+			mosq->pool[p_idx] = packet;
+			mosq->pool_mask |= (1ULL << p_idx);
+
+			if(priority == 0) {mosq->high_mask |= (1ULL << p_idx);}
+			else if(priority == 1) {mosq->mid_mask |= (1ULL << p_idx);}
+			else if(priority == 2) {mosq->low_mask |= (1ULL << p_idx);}
+		}
+	}
+
 	if(mosq->out_packet){
 		mosq->out_packet_last->next = packet;
 	}else{
