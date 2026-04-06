@@ -313,7 +313,6 @@ int packet__write(struct mosquitto *mosq)
 	struct mosquitto__packet *packet, *next_packet;
 	enum mosquitto_client_state state;
 
-	log__printf(NULL, MOSQ_LOG_INFO, "패킷쓰기 시작!!!\n");
 	if(!mosq){
 		return MOSQ_ERR_INVAL;
 	}
@@ -321,31 +320,8 @@ int packet__write(struct mosquitto *mosq)
 		return MOSQ_ERR_NO_CONN;
 	}
 
-	int target_idx = -1;
-	bool is_priority_packet = false;
-
 	COMPAT_pthread_mutex_lock(&mosq->out_packet_mutex);
-	if(mosq->high_mask != 0) {
-		is_priority_packet = true;
-		log__printf(NULL, MOSQ_LOG_INFO, "하이 패킷임 이거 ㅋㅋ\n");
-		target_idx = __builtin_ctzll(mosq->high_mask);
-		packet = mosq->pool[target_idx];
-	}
-	else if(mosq->mid_mask != 0) {
-		is_priority_packet = true;
-		log__printf(NULL, MOSQ_LOG_INFO, "미드 패킷임 이거 ㅋㅋ\n");
-		target_idx = __builtin_ctzll(mosq->mid_mask);
-		packet = mosq->pool[target_idx];
-	}
-	else if(mosq->low_mask != 0) {
-		is_priority_packet = true;
-		log__printf(NULL, MOSQ_LOG_INFO, "로우 패킷임 이거 ㅋㅋ\n");
-		target_idx = __builtin_ctzll(mosq->low_mask);
-		packet = mosq->pool[target_idx];
-	}
-	else {packet = mosq->out_packet;
-		log__printf(NULL, MOSQ_LOG_INFO, "일반 패킷임 이거 ㅋㅋ\n");
-	}
+	packet = mosq->out_packet;
 	COMPAT_pthread_mutex_unlock(&mosq->out_packet_mutex);
 
 	if(packet == NULL){
@@ -362,6 +338,27 @@ int packet__write(struct mosquitto *mosq)
 	}
 
 	while(packet){
+		int target_idx = -1;
+		bool is_priority_packet = false;
+		// 우선순위 패킷이 있는지 확인하고, 있다면 해당 패킷을 선택
+		COMPAT_pthread_mutex_lock(&mosq->out_packet_mutex);
+		if(mosq->high_mask != 0) {
+			is_priority_packet = true;
+			target_idx = __builtin_ctzll(mosq->high_mask);
+			packet = mosq->pool[target_idx];
+		}
+		else if(mosq->mid_mask != 0) {
+			is_priority_packet = true;
+			target_idx = __builtin_ctzll(mosq->mid_mask);
+			packet = mosq->pool[target_idx];
+		}
+		else if(mosq->low_mask != 0) {
+			is_priority_packet = true;
+			target_idx = __builtin_ctzll(mosq->low_mask);
+			packet = mosq->pool[target_idx];
+		}
+		COMPAT_pthread_mutex_unlock(&mosq->out_packet_mutex);
+
 		while(packet->to_process > 0){
 			write_length = net__write(mosq, &(packet->payload[packet->pos]), packet->to_process);
 			if(write_length > 0){
@@ -401,31 +398,24 @@ int packet__write(struct mosquitto *mosq)
 #endif
 		}
 
-		if (is_priority_packet) {
-			bool queue_empty = false;
+		if(is_priority_packet) {
 			bool removed = false;
-			log__printf(NULL, MOSQ_LOG_INFO, "우선순위 패킷일까용\n");
 			COMPAT_pthread_mutex_lock(&mosq->out_packet_mutex);
         
 			if(mosq->out_packet == packet) {
-				log__printf(NULL, MOSQ_LOG_INFO, "큐 머리에용\n");
 				mosq->out_packet = packet->next;
 				if(mosq->out_packet == NULL) {mosq->out_packet_last = NULL;}
 				removed = true;
-				log__printf(NULL, MOSQ_LOG_INFO, "머리끊기 성공\n");
 			} 
 			else {
-				log__printf(NULL, MOSQ_LOG_INFO, "중간 꼽사리에옹\n");
 				struct mosquitto__packet *prev = mosq->out_packet;
 				while(prev && prev->next != packet) {prev = prev->next;}
 				if(prev){
 					prev->next = packet->next;
 					if(packet->next == NULL) {mosq->out_packet_last = prev;}
 					removed = true;
-					log__printf(NULL, MOSQ_LOG_INFO, "중간 끊기 성공\n");
 				}
 			}
-
 			if(removed) {
 				// out_packet_count 및 out_packet_bytes 업데이트
 				mosq->out_packet_count--;
@@ -441,38 +431,22 @@ int packet__write(struct mosquitto *mosq)
 					mosq->pool_mask &= ~(1ULL << target_idx);
 					mosq->pool[target_idx] = NULL;
 				}
-				packet->next = NULL;	
-				
-				if(mosq->out_packet == NULL) {queue_empty = true;}
 			}
-			COMPAT_pthread_mutex_unlock(&mosq->out_packet_mutex);
-
 			if(!removed) {
-				log__printf(NULL, MOSQ_LOG_ERR,
-					"우선순위 끊기 실패 ㅈㅈ;, packet=%p idx=%d\n",
-					(void *)packet, target_idx);
+				COMPAT_pthread_mutex_unlock(&mosq->out_packet_mutex);
 				return MOSQ_ERR_PROTOCOL;
 			}
 
-			
-#ifdef WITH_BROKER
-			mosq->next_msg_out = db.now_s + mosq->keepalive;
-			if(queue_empty){
-				mux__remove_out(mosq);
-			}
-#else
-			COMPAT_pthread_mutex_lock(&mosq->msgtime_mutex);
-			mosq->next_msg_out = mosquitto_time() + mosq->keepalive;
-			COMPAT_pthread_mutex_unlock(&mosq->msgtime_mutex);
-#endif
 			mosquitto_FREE(packet);
-			return MOSQ_ERR_SUCCESS;
+			packet = mosq->out_packet;
+			COMPAT_pthread_mutex_unlock(&mosq->out_packet_mutex);
 		}
 		else{
 			next_packet = packet__get_next_out(mosq);
 			mosquitto_FREE(packet);
 			packet = next_packet;
 		}
+		
 
 #ifdef WITH_BROKER
 		mosq->next_msg_out = db.now_s + mosq->keepalive;
