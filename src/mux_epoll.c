@@ -42,6 +42,14 @@ static void loop_handle_reads_writes(struct mosquitto *context, uint32_t events)
 
 static struct epoll_event ep_events[MAX_EVENTS];
 
+enum packet_prio {
+	PRIO_HIGH = 0,
+	PRIO_MID,
+	PRIO_LOW,
+	PRIO_NORMAL
+};
+
+static enum packet_prio classify_topic_from_peek(struct mosquitto *context);
 
 int mux_epoll__init(void)
 {
@@ -181,9 +189,7 @@ int mux_epoll__handle(void)
 		default:
 			for(int i=0; i<event_count; i++){
 				context = ep_events[i].data.ptr;
-				if(context->ident == id_client){
-					loop_handle_reads_writes(context, ep_events[i].events);
-				}else if(context->ident == id_listener){
+				if(context->ident == id_listener){
 					listensock = ep_events[i].data.ptr;
 
 					if(ep_events[i].events & (EPOLLIN | EPOLLPRI)){
@@ -197,6 +203,74 @@ int mux_epoll__handle(void)
 #endif
 				}
 			}
+
+			/* 2. client 이벤트 분류 */
+			for(int i=0; i<event_count && i<64; i++){
+				context = ep_events[i].data.ptr;
+
+				if(context->ident != id_client){
+					continue;
+				}
+
+				/* 읽기 이벤트가 없으면 일반 우선순위 */
+				if(!(ep_events[i].events & EPOLLIN)){
+					normal_mask |= (1ULL << i);
+					continue;
+				}
+
+				switch(classify_topic_from_peek(context)){
+					case PRIO_HIGH:
+						high_mask |= (1ULL << i);
+						break;
+
+					case PRIO_MID:
+						mid_mask |= (1ULL << i);
+						break;
+
+					case PRIO_LOW:
+						low_mask |= (1ULL << i);
+						break;
+
+					case PRIO_NORMAL:
+					default:
+						normal_mask |= (1ULL << i);
+						break;
+				}
+			}
+
+			/* 3. 우선순위 순서대로 처리 */
+			while(1){
+				int idx;
+
+				if(high_mask != 0){
+					idx = __builtin_ctzll(high_mask);
+					context = ep_events[idx].data.ptr;
+					loop_handle_reads_writes(context, ep_events[idx].events);
+					high_mask &= ~(1ULL << idx);
+
+				}else if(mid_mask != 0){
+					idx = __builtin_ctzll(mid_mask);
+					context = ep_events[idx].data.ptr;
+					loop_handle_reads_writes(context, ep_events[idx].events);
+					mid_mask &= ~(1ULL << idx);
+
+				}else if(low_mask != 0){
+					idx = __builtin_ctzll(low_mask);
+					context = ep_events[idx].data.ptr;
+					loop_handle_reads_writes(context, ep_events[idx].events);
+					low_mask &= ~(1ULL << idx);
+
+				}else if(normal_mask != 0){
+					idx = __builtin_ctzll(normal_mask);
+					context = ep_events[idx].data.ptr;
+					loop_handle_reads_writes(context, ep_events[idx].events);
+					normal_mask &= ~(1ULL << idx);
+
+				}else{
+					break;
+				}
+			}
+			break;
 	}
 	return MOSQ_ERR_SUCCESS;
 }
@@ -209,6 +283,92 @@ int mux_epoll__cleanup(void)
 	return MOSQ_ERR_SUCCESS;
 }
 
+static enum packet_prio classify_topic_from_peek(struct mosquitto *context)
+{
+	unsigned char buf[256];
+	ssize_t n;
+	size_t pos;
+	size_t rem_len_bytes;
+	uint32_t remaining_length;
+	uint32_t multiplier;
+	uint16_t topic_len;
+	char topic[128];
+	size_t len;
+
+	if(!context || context->sock == INVALID_SOCKET){
+		return PRIO_NORMAL;
+	}
+
+	memset(buf, 0, sizeof(buf));
+	n = recv(context->sock, buf, sizeof(buf), MSG_PEEK);
+	if(n <= 0){
+		return PRIO_NORMAL;
+	}
+
+	/* 최소 fixed header 2바이트는 있어야 함 */
+	if(n < 2){
+		return PRIO_NORMAL;
+	}
+
+	/* MQTT Control Packet Type = upper nibble
+	 * PUBLISH = 0x3
+	 */
+	if(((buf[0] >> 4) & 0x0F) != 0x03){
+		return PRIO_NORMAL;
+	}
+
+	/* Remaining Length 파싱 */
+	pos = 1;
+	remaining_length = 0;
+	multiplier = 1;
+	rem_len_bytes = 0;
+
+	do{
+		if(pos >= (size_t)n){
+			return PRIO_NORMAL;
+		}
+
+		remaining_length += (buf[pos] & 0x7F) * multiplier;
+		multiplier *= 128;
+		rem_len_bytes++;
+	}while((buf[pos++] & 0x80) != 0 && rem_len_bytes < 4);
+
+	/* topic length 2바이트 확인 */
+	if(pos + 2 > (size_t)n){
+		return PRIO_NORMAL;
+	}
+
+	topic_len = (uint16_t)((buf[pos] << 8) | buf[pos+1]);
+	pos += 2;
+
+	if(topic_len == 0){
+		return PRIO_NORMAL;
+	}
+
+	/* topic 문자열 전체가 peek buffer 안에 있는지 확인 */
+	if(pos + topic_len > (size_t)n){
+		return PRIO_NORMAL;
+	}
+
+	/* local topic buffer 크기 제한 */
+	if(topic_len >= sizeof(topic)){
+		return PRIO_NORMAL;
+	}
+
+	memcpy(topic, &buf[pos], topic_len);
+	topic[topic_len] = '\0';
+	len = strlen(topic);
+
+	if(len >= 7 && strcmp(topic + len - 7, "/pQoS0") == 0){
+		return PRIO_HIGH;
+	}else if(len >= 7 && strcmp(topic + len - 7, "/pQoS1") == 0){
+		return PRIO_MID;
+	}else if(len >= 7 && strcmp(topic + len - 7, "/pQoS2") == 0){
+		return PRIO_LOW;
+	}else{
+		return PRIO_NORMAL;
+	}
+}
 
 static void loop_handle_reads_writes(struct mosquitto *context, uint32_t events)
 {
