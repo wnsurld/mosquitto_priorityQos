@@ -42,6 +42,11 @@ static void loop_handle_reads_writes(struct mosquitto *context, uint32_t events)
 
 static struct epoll_event ep_events[MAX_EVENTS];
 
+static uint64_t get_now_ns(void);
+static bool batch_active = false;
+static uint64_t batch_timer_ns = 0;
+#define WINDOW 5000000ULL
+
 enum packet_prio {
 	PRIO_HIGH = 0,
 	PRIO_MID,
@@ -160,23 +165,68 @@ int mux_epoll__delete(struct mosquitto *context)
 	return 0;
 }
 
+static uint64_t get_now_ns(void) {
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
+}
 
 int mux_epoll__handle(void)
-{
+{	
 	struct epoll_event ev;
 	struct mosquitto *context;
 	struct mosquitto__listener_sock *listensock;
 	int event_count;
+	uint64_t high_mask = 0;
+	uint64_t mid_mask = 0;
+	uint64_t low_mask = 0;
+	uint64_t normal_mask = 0;
+	int timeout_ms = db.next_event_ms;
+	uint64_t now_ns = get_now_ns();
+
+	if(batch_active){
+		if(now_ns >= batch_timer_ns){
+			timeout_ms = 0;
+		}else{
+			uint64_t remain_ns = batch_timer_ns - now_ns;
+			int remain_ms = (int)(remain_ns / 1000000ULL);
+			if(remain_ms <= 0) remain_ms = 0;
+			if(timeout_ms < 0 || remain_ms < timeout_ms){
+				timeout_ms = remain_ms;
+			}
+		}
+	}
 
 	memset(&ev, 0, sizeof(struct epoll_event));
 #if defined(WITH_WEBSOCKETS)
 	event_count = epoll_wait(db.epollfd, ep_events, MAX_EVENTS, 100);
 #else
-	event_count = epoll_wait(db.epollfd, ep_events, MAX_EVENTS, db.next_event_ms);
+	event_count = epoll_wait(db.epollfd, ep_events, MAX_EVENTS, timeout_ms);
 #endif
-
 	db.now_s = mosquitto_time();
 	db.now_real_s = time(NULL);
+
+	/* batch 시작 조건 */
+	if(!batch_active){
+		bool has_client_in = false;
+		for(int i=0; i<event_count; i++){
+			struct mosquitto *c = ep_events[i].data.ptr;
+			if(c && c->ident == id_client && (ep_events[i].events & EPOLLIN)){
+				has_client_in = true;
+				break;
+			}
+		}
+		if(has_client_in){
+			batch_active = true;
+			batch_timer_ns = get_now_ns() + WINDOW;
+			return MOSQ_ERR_SUCCESS;
+		}
+	}
+
+	/* 아직 타이머 안 끝났으면 계속 모음 */
+	if(batch_active && get_now_ns() < batch_timer_ns){
+		return MOSQ_ERR_SUCCESS;
+	}
 
 	switch(event_count){
 		case -1:
@@ -187,6 +237,7 @@ int mux_epoll__handle(void)
 		case 0:
 			break;
 		default:
+			log__printf(NULL, MOSQ_LOG_INFO, "이벤트 갯수 = %d ", event_count);
 			for(int i=0; i<event_count; i++){
 				context = ep_events[i].data.ptr;
 				if(context->ident == id_listener){
@@ -272,6 +323,8 @@ int mux_epoll__handle(void)
 			}
 			break;
 	}
+	batch_active = false;
+	batch_timer_ns = 0;
 	return MOSQ_ERR_SUCCESS;
 }
 
@@ -359,13 +412,17 @@ static enum packet_prio classify_topic_from_peek(struct mosquitto *context)
 	topic[topic_len] = '\0';
 	len = strlen(topic);
 
-	if(len >= 7 && strcmp(topic + len - 7, "/pQoS0") == 0){
+	if(len >= 6 && strcmp(topic + len - 6, "/pQoS0") == 0){
+		log__printf(NULL, MOSQ_LOG_INFO, "토픽 분류 '%s' as HIGH 지렁.", topic);
 		return PRIO_HIGH;
-	}else if(len >= 7 && strcmp(topic + len - 7, "/pQoS1") == 0){
+	}else if(len >= 6 && strcmp(topic + len - 6, "/pQoS1") == 0){
+		log__printf(NULL, MOSQ_LOG_INFO, "토픽 분류 '%s' as MID 지렁.", topic);
 		return PRIO_MID;
-	}else if(len >= 7 && strcmp(topic + len - 7, "/pQoS2") == 0){
+	}else if(len >= 6 && strcmp(topic + len - 6, "/pQoS2") == 0){
+		log__printf(NULL, MOSQ_LOG_INFO, "토픽 분류 '%s' as LOW 지렁.", topic);
 		return PRIO_LOW;
 	}else{
+		log__printf(NULL, MOSQ_LOG_INFO, "토픽 분류 '%s' as NORMAL 지렁.", topic);
 		return PRIO_NORMAL;
 	}
 }
