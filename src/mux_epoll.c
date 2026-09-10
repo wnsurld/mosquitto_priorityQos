@@ -262,19 +262,19 @@ int mux_epoll__handle(void)
 				int idx;
 				
 				if(qos0_mask != 0){
-					idx = __builtin_ctzll(qos1_mask);
+					idx = __builtin_ctzll(qos0_mask);
 					context = ep_events[idx].data.ptr;
 					loop_handle_reads_writes(context, ep_events[idx].events);
 					qos0_mask &= ~(1ULL << idx);
 
 				}else if(qos1_mask != 0){
-					idx = __builtin_ctzll(mid_mask);
+					idx = __builtin_ctzll(qos1_mask);
 					context = ep_events[idx].data.ptr;
 					loop_handle_reads_writes(context, ep_events[idx].events);
 					qos1_mask &= ~(1ULL << idx);
 
 				}else if(qos2_mask != 0){
-					idx = __builtin_ctzll(low_mask);
+					idx = __builtin_ctzll(qos2_mask);
 					context = ep_events[idx].data.ptr;
 					loop_handle_reads_writes(context, ep_events[idx].events);
 					qos2_mask &= ~(1ULL << idx);
