@@ -1,128 +1,98 @@
-Eclipse Mosquitto
-=================
+# MQTT 우선순위 기반 메시지 처리
 
-Mosquitto is an open source implementation of a server for version 5.0, 3.1.1,
-and 3.1 of the MQTT protocol. It also includes a C and C++ client library,
-the `mosquitto_pub` `mosquitto_rr`, and `mosquitto_sub` utilities for
-publishing and subscribing, and the `mosquitto_ctrl`, `mosquitto_signal`, and
-`mosquitto_passwd` applications for helping administer the broker.
+## 🚀 프로젝트 소개
 
-## Links
+다수의 IoT 기기가 연결된 환경에서 **비상벨·알람 등 긴급 메시지를 먼저 처리**하기 위해 Mosquitto 브로커를 수정한 프로젝트입니다.
 
-See the following links for more information on MQTT:
+MQTT의 기존 QoS는 메시지 전달의 신뢰성을 정의하지만, 긴급도에 따른 처리 우선순위는 제공하지 않습니다. 일반 센서 데이터와 긴급 메시지가 함께 유입될 때 중요한 메시지를 우선 처리할 수 있도록, **토픽 기반 우선순위 분류와 이벤트 처리 순서 제어**를 구현했습니다. 이를 통해 긴급 상황에 대한 빠른 대응을 지원하는 것을 목표로 합니다.
 
-- Community page: <http://mqtt.org/>
-- MQTT v3.1.1 standard: <https://docs.oasis-open.org/mqtt/mqtt/v3.1.1/mqtt-v3.1.1.html>
-- MQTT v5.0 standard: <https://docs.oasis-open.org/mqtt/mqtt/v5.0/mqtt-v5.0.html>
+## ✨ 주요 기능
 
-Mosquitto project information is available at the following locations:
+- **우선순위 분류**: 메시지 토픽을 기준으로 qos0·qos1·qos2·NORMAL 등급을 부여합니다.
+- **우선순위별 처리**: 같은 epoll 배치에서 감지된 이벤트 중 높은 우선순위의 이벤트부터 처리합니다.
 
-- Main homepage: <https://mosquitto.org/>
-- Find existing bugs or submit a new bug: <https://github.com/eclipse-mosquitto/mosquitto/issues>
-- Source code repository: <https://github.com/eclipse-mosquitto/mosquitto>
 
-There is also a public test server available at <https://test.mosquitto.org/>
+## ⚙️ 기능 구현 및 처리 흐름
 
-## Installing
+### 1. epoll 기반 수신 이벤트 감지
 
-See <https://mosquitto.org/download/> for details on installing binaries for
-various platforms.
+브로커는 `epoll_wait()`를 통해 클라이언트 소켓에서 발생한 이벤트를 감지합니다. 여러 이벤트가 함께 감지되면, 수신 가능한 이벤트를 대상으로 메시지 우선순위를 분류합니다.
 
-## Quick start
+기존 이벤트 배열 순서대로 처리하는 방식에 **우선순위 분류와 처리 순서 선택 단계**를 추가했습니다.
 
-If you have installed a binary package the broker should have been started
-automatically. If not, it can be started with a very basic configuration:
+### 2. 메시지 토픽 사전 확인
 
-    mosquitto
+`recv()`의 `MSG_PEEK` 옵션을 사용해 수신 버퍼의 데이터를 제거하지 않고 패킷을 확인합니다. MQTT 패킷이 PUBLISH인지 확인한 뒤, Remaining Length와 토픽 길이를 읽어 토픽을 추출합니다.
 
-Then use `mosquitto_sub` to subscribe to a topic:
+실제 메시지 수신은 기존 Mosquitto 처리 함수가 수행하므로, 이 단계에서는 **우선순위 판단에 필요한 정보만 미리 확인**합니다.
 
-    mosquitto_sub -t 'test/topic' -v
+### 3. 토픽 기반 우선순위 분류
 
-And to publish a message:
+추출한 토픽의 접미사를 기준으로 이벤트를 분류합니다.
 
-    mosquitto_pub -t 'test/topic' -m 'hello world'
+| 토픽 접미사 | 분류 | 처리 순서 |
+| --- | --- | --- |
+| `/pQoS0` | qos0 | 1 |
+| `/pQoS1` | qos1 | 2 |
+| `/pQoS2` | qos2 | 3 |
+| 그 외 | NORMAL | 4 |
+| 분류에 필요한 데이터 부족 | UNKNOWN | 5 |
 
-Note that starting the broker like this allows anonymous/unauthenticated access
-but only from the local computer, so it's only really useful for initial testing.
+PUBLISH 이외의 패킷은 NORMAL로 분류합니다.
 
-If you want to have clients from another computer connect, you will need to
-provide a configuration file. If you have installed from a binary package, you
-will probably already have a configuration file at somewhere like
-`/etc/mosquitto/mosquitto.conf`. If you've compiled from source, you can write
-your config file then run as `mosquitto -c /path/to/mosquitto.conf`.
+### 4. 비트마스크에 이벤트 저장
 
-To start your config file you define a listener and you will need to think
-about what authentication you require. It is not advised to run your broker
-with anonymous access when it is publicly available.
+각 우선순위는 별도의 비트마스크로 관리합니다. 분류된 이벤트의 배열 인덱스에 해당하는 비트를 1로 설정해 처리 대상을 표시합니다.
 
-For details on how to do this, look at the
-[authentication methods](https://mosquitto.org/documentation/authentication-methods/)
-available and the [dynamic security plugin](https://mosquitto.org/documentation/dynamic-security/).
+```c
+qos0_mask |= (1ULL << i);
+```
 
-## Documentation
+예를 들어 이벤트 배열의 2번과 5번 이벤트가 /pQoS0 이라면, `qos0_mask`의 2번·5번 비트를 설정합니다.
 
-Documentation for the broker, clients and client library API can be found in
-the man pages, which are available online at <https://mosquitto.org/man/>. There
-are also pages with an introduction to the features of MQTT, the
-`mosquitto_passwd` utility for dealing with username/passwords, and a
-description of the configuration file options available for the broker.
+### 5. 우선순위별 이벤트 처리
 
-Detailed client library API documentation can be found at <https://mosquitto.org/api/>
+qos0부터 순서대로 비트마스크를 확인하고, `__builtin_ctzll()`로 가장 낮은 위치의 설정된 비트를 찾아 이벤트 인덱스를 얻습니다.
 
-## Building from source
+```c
+idx = __builtin_ctzll(qos0_mask);
+context = ep_events[idx].data.ptr;
+loop_handle_reads_writes(context, ep_events[idx].events);
+qos0_mask &= ~(1ULL << idx);
+```
 
-To build from source the recommended route for end users is to download the
-archive from <https://mosquitto.org/download/>.
+선택한 이벤트는 기존 `loop_handle_reads_writes()`에 전달하며, 처리가 끝나면 해당 비트를 제거합니다. 높은 우선순위의 이벤트를 모두 처리한 뒤 다음 등급으로 이동합니다.
 
-On Windows and Mac, use `cmake` to build. On other platforms, just run `make`
-to build. For Windows, see also `README-windows.md`.
+같은 우선순위 안에서는 이벤트 배열 인덱스 순서로 처리합니다. 이 방식은 **같은 epoll 배치 안의 이벤트 처리 순서**를 조정하며, 전체 메시지의 도착 순서나 최종 수신 순서를 보장하는 것은 아닙니다.
 
-If you are building from the git repository then the documentation will not
-already be built. Use `make binary` to skip building the man pages, or install
-`docbook-xsl` on Debian/Ubuntu systems.
 
-### Build Dependencies
 
-* cJSON - required
-* c-ares (libc-ares-dev on Debian based systems) - optional, enable with
-  `WITH_SRV=yes`
-* libedit - for mosquitto_ctrl interactive shell - optional, disable with
-  `WITH_EDITLINE=no`
-* libmicrohttpd - for broker http api support - optional, disable with
-  `WITH_HTTP_API=no`
-* openssl (libssl-dev on Debian based systems) - optional, disable with
-  `WITH_TLS=no`
-* pthreads - for client library thread support. This is required to support the
-  `mosquitto_loop_start()` and `mosquitto_loop_stop()` functions. If compiled
-  without pthread support, the library isn't guaranteed to be thread safe.
-* sqlite3 - for persistence support in the broker - optional, disable with
-  `WITH_SQLITE=no`
-* uthash / utlist - bundled versions of these headers are provided, disable
-  their use with `WITH_BUNDLED_DEPS=no`
-* xsltproc (xsltproc and docbook-xsl on Debian based systems) - only needed
-  when building from git sources - disable with `WITH_DOCS=no`
+```text
+epoll 이벤트 감지
+    ↓
+MSG_PEEK으로 PUBLISH 토픽 확인
+    ↓
+HIGH / MID / LOW / NORMAL / UNKNOWN 분류
+    ↓
+우선순위별 비트마스크에 이벤트 인덱스 저장
+    ↓
+높은 우선순위부터 기존 처리 함수 호출
+    ↓
+처리 로그 및 수신 결과 기록
+```
 
-Equivalent options for enabling/disabling features are available when using the
-CMake build. It is also possible to enable/disable building of specific plugins
-in the CMake build.
 
-### Building mosquitto - Using vcpkg
 
-You can download and install mosquitto using the [vcpkg](https://github.com/Microsoft/vcpkg) dependency manager:
+## 🛠 기술 스택
 
-    git clone https://github.com/Microsoft/vcpkg.git
-    cd vcpkg
-    ./bootstrap-vcpkg.sh
-    ./vcpkg integrate install
-    ./vcpkg install mosquitto
+| 구분 | 기술 및 역할 |
+| --- | --- |
+| 언어 | `C` |
+| 브로커 | `Eclipse Mosquitto` — 메시지 처리 로직 수정 |
+| 통계 | `Python Pands` — 측정 시간 로그 분석 |
 
-The mosquitto port in vcpkg is kept up to date by Microsoft team members and
-community contributors. If the version is out of date, please [create an issue
-or pull request](https://github.com/Microsoft/vcpkg) on the vcpkg repository.
 
-## Credits
 
-Mosquitto was written by Roger Light <roger@atchoo.org>. There have been
-substantial contributions by other people in the community both in terms of
-code and other help.
+
+
+기반 프로젝트: Eclipse Mosquitto.
